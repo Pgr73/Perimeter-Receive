@@ -5,42 +5,13 @@
 // Common Defines
 //----------------------------
 
-//#define SERIAL_PLOTTER
 #define TIMER_PRESCALER 80
 
-//----------------------------
-// Perimeter function
-//----------------------------
-#define PERIMETER_PROCESSING_TASK_ESP_CORE 1
-#define TIMER_PERIMETER_PERIOD 500 * 1000 // in microseconds
-#define TIMER_PERIMETER_NUMBER 1
-#define PERIMETER_QUEUE_LEN 5
-
+#define SERIAL_PLOTTER
+#define FAST_ANALOG_TRACE
 #define PERIMETER_TRACE
 
-//SemaphoreHandle_t g_PerimeterProcTimerSemaphore;
-hw_timer_t *g_PerimeterTimerhandle = NULL;
-portMUX_TYPE g_PerimeterTimerMux = portMUX_INITIALIZER_UNLOCKED;
-TaskHandle_t g_PerimeterProcTaskHandle;
-QueueHandle_t g_PerimeterTimerQueue;
-volatile int g_PerimeterQueuefull = 0;
-
-volatile uint16_t g_PerimeterRawMax = 0;
-volatile uint16_t g_PerimeterRawMin = INT_MAX;
-volatile uint16_t g_PerimeterRawAvg = 0;
-volatile bool g_isInsidePerimeter = false;
-volatile bool g_PerimetersignalTimedOut = false;
-
-volatile int g_PerimeterMagnitude = 0;
-volatile int g_PerimeterSmoothMagnitude = 0;
-volatile float g_PerimeterFilterQuality = 0;
-
-
-#ifdef PERIMETER_TRACE
-volatile long g_PerimeterinQueue = 0;
-volatile int g_PerimeterinQueueMax = 0;
-volatile unsigned long g_PerimeterTimerCount = 0;
-#endif
+//#define LOAD_SIMUL
 
 //----------------------------
 // Fast Ana Read function
@@ -64,10 +35,8 @@ volatile unsigned long g_PerimeterTimerCount = 0;
 #define BYTES_NEEDED 2
 #define I2S_SAMPLES 256
 #define DMA_BUF_LEN 24 * 4 * 2 //24 bits code length * 4 time oversampling (ardumower) * 2 Times oversampling => 192 samples
-#define RAW_SAMPLES DMA_BUF_LEN * 10
+#define RAW_SAMPLES DMA_BUF_LEN * 5
 #define ANA_READ_TASK_ESP_CORE 1
-
-#define FAST_ANALOG_TRACE
 
 //SemaphoreHandle_t g_FastTimerSemaphore;
 hw_timer_t *g_FastTimerhandle = NULL;
@@ -79,8 +48,8 @@ SemaphoreHandle_t g_RawValuesSemaphore;
 
 volatile int g_I2SSamples = 24 * 4 * 2;
 //volatile int g_I2SSamples = 10;
-volatile uint16_t g_raw[RAW_SAMPLES] = {0};
-volatile int g_rawWritePtr = 0;
+uint16_t g_raw[RAW_SAMPLES];
+int g_rawWritePtr = 0;
 volatile size_t g_timeout = 0;
 //volatile int g_I2SQueueFull = 0;
 
@@ -99,6 +68,56 @@ volatile long g_readTime = 0;
 volatile int g_inQueueMax = 0;
 volatile long g_inQueue = 0;
 #endif
+
+
+//----------------------------
+// Perimeter function
+//----------------------------
+#define PERIMETER_PROCESSING_TASK_ESP_CORE 1
+#define TIMER_PERIMETER_PERIOD 500 * 1000 // in microseconds
+#define TIMER_PERIMETER_NUMBER 1
+#define PERIMETER_QUEUE_LEN 5
+
+//SemaphoreHandle_t g_PerimeterProcTimerSemaphore;
+hw_timer_t *g_PerimeterTimerhandle = NULL;
+portMUX_TYPE g_PerimeterTimerMux = portMUX_INITIALIZER_UNLOCKED;
+TaskHandle_t g_PerimeterProcTaskHandle;
+QueueHandle_t g_PerimeterTimerQueue;
+volatile int g_PerimeterQueuefull = 0;
+
+uint16_t g_PerimeterRawMax = 0;
+uint16_t g_PerimeterRawMin = UINT_MAX;
+volatile uint16_t g_PerimeterRawAvg = 0;
+volatile bool g_isInsidePerimeter = false;
+volatile bool g_PerimetersignalTimedOut = false;
+
+volatile int g_PerimeterMagnitude = 0;
+volatile int g_PerimeterSmoothMagnitude = 0;
+float g_PerimeterFilterQuality = 0;
+
+  // http://grauonline.de/alexwww/ardumower/filter/filter.html    
+  // "pseudonoise4_pw" signal
+  // if using reconstructed sender signal, use this
+int8_t sigcode_norm[]        = { 1,1,-1,-1,1,-1,1,-1,-1,1,-1,1,1,-1,-1,1,-1,-1,1,-1,-1,1,1,-1 };   
+// "pseudonoise4_pw" signal (differential)
+// if using the coil differential signal, use this
+int8_t sigcode_diff[]        = { 1,0,-1, 0,1,-1,1,-1, 0,1,-1,1,0,-1, 0,1,-1, 0,1,-1, 0,1,0,-1 };   
+
+bool useDifferentialPerimeterSignal = true;
+bool swapCoilPolarity = false;  
+
+char subSample = 4; // value for 38462 sampling rate
+int8_t g_PerimeterSamplesForMatchedFilter[DMA_BUF_LEN];
+
+#ifdef PERIMETER_TRACE
+volatile long g_PerimeterinQueue = 0;
+int g_PerimeterinQueueMax = 0;
+volatile long g_PerimeterTimerCount = 0;
+volatile long g_PerimeterLoopDuration = 0;
+volatile long g_PerimeterLoopCount = 0;
+volatile long g_semholdTime = 0;
+#endif
+
 
 //----------------------------
 // Common
@@ -237,7 +256,7 @@ void initI2S(void)
 
 /*
 //-----------------------------------------------------------------------------
-//  AnaLog Read Timer (NOT USE ANY MORE)
+//  AnaLog Read Timer (NOT USED ANY MORE)
 //-----------------------------------------------------------------------------
 
 ICACHE_RAM_ATTR void FastAnaReadTimerISR(void)
@@ -269,10 +288,12 @@ void InitFastTimer(void)
 
 void FastAnaReadLoopTask(void *dummyParameter)
 {
+#ifdef FAST_ANALOG_TRACE
   static unsigned long StartMicros = micros();
-  static bool SetupDone = false;
   static unsigned long delay = 0;
   long duration = 0;
+#endif
+  static bool SetupDone = false;
 
   for (;;)
   {
@@ -309,7 +330,9 @@ void FastAnaReadLoopTask(void *dummyParameter)
 
       if (evt.type == I2S_EVENT_RX_DONE)
       {
+#ifdef FAST_ANALOG_TRACE
         StartMicros = micros();
+#endif
         //        xSemaphoreTake(g_MyglobalSemaphore, portMAX_DELAY);
         //        bool suspended = g_FastAnaReadTaskSuspended;
         //        xSemaphoreGive(g_MyglobalSemaphore);
@@ -319,6 +342,7 @@ void FastAnaReadLoopTask(void *dummyParameter)
         I2SAnalogRead(g_I2SSamples);
         //        }
 
+#ifdef FAST_ANALOG_TRACE
         //time consuming loop (if necessary !!!)
         delay = max(0UL, g_delay - (micros() - StartMicros));
         if (delay > g_delay)
@@ -339,6 +363,7 @@ void FastAnaReadLoopTask(void *dummyParameter)
         g_FastAnaReadLoopDurationMin = min((long)g_FastAnaReadLoopDurationMin, duration);
         xSemaphoreGive(g_MyglobalSemaphore);
         portEXIT_CRITICAL_SAFE(&g_LoopMux);
+#endif
       }
     }
     //    else
@@ -350,6 +375,9 @@ void FastAnaReadLoopTask(void *dummyParameter)
 
 void FastAnaReadLoopTaskCreate(void)
 {
+  g_ADCinUse = xSemaphoreCreateMutex();
+  g_RawValuesSemaphore = xSemaphoreCreateMutex();
+
   BaseType_t xReturned;
   xReturned = xTaskCreatePinnedToCore(
       FastAnaReadLoopTask,      /* Task function. */
@@ -396,7 +424,9 @@ ICACHE_RAM_ATTR void PerimeterTimerISR(void)
   byte Message = 1;
 
   portENTER_CRITICAL_ISR(&g_PerimeterTimerMux);
+#ifdef PERIMETER_TRACE
   g_PerimeterTimerCount = g_PerimeterTimerCount + 1;
+#endif
 
 //  xSemaphoreGive(g_PerimeterProcTimerSemaphore);
   QueueReturn = xQueueSendToBackFromISR(g_PerimeterTimerQueue, &Message, &xHigherPriorityTaskWoken );
@@ -465,22 +495,33 @@ void PerimeterProcessingSetup(void)
 }
 
 /**
- * Perimeter data processing task Setup function
+ * Perimeter data raw value copy and pre-procEssing function (min/Max/Average)
  * 
  */
 void GetPerimeterRawValues(int Samples)
 {
 #ifdef PERIMETER_TRACE
-  Serial.print("Get " + String(Samples) + " Perimeter values =>");
+//  Serial.print("Get " + String(Samples) + " Perimeter values ");
 #endif
-
+  uint16_t RawCopy[RAW_SAMPLES];
   long rawTotal = 0;
 
-  portENTER_CRITICAL_SAFE(&g_PerimeterTimerMux);
+//  portENTER_CRITICAL_SAFE(&g_PerimeterTimerMux);
+#ifdef PERIMETER_TRACE
+  unsigned long start = micros();
+#endif
   xSemaphoreTake(g_RawValuesSemaphore, portMAX_DELAY);
 
-  // Get start and end point in g_Raw circular buffer
+  // Get a copy of the g_Raw circular buffer
+  memcpy(&RawCopy, &g_raw, RAW_SAMPLES*sizeof(uint16_t));
   int Ptr = g_rawWritePtr;
+  xSemaphoreGive(g_RawValuesSemaphore);
+#ifdef PERIMETER_TRACE
+  unsigned long end = micros();
+#endif
+
+  // Get start and end point in g_Raw circular buffer
+
   int endPtr = Ptr - 1;
   if (endPtr < 0)
   {
@@ -495,12 +536,17 @@ void GetPerimeterRawValues(int Samples)
 
   int i = startPtr;
 
+#ifdef PERIMETER_TRACE
+//  Serial.print("from " + String(startPtr) + " to "+ String(endPtr));
+#endif
+
   // Get "Samples" values from g_Raw circular buffer and determine min/max/Total
   for (int l = 0; l < Samples; l++)
   {
-    g_PerimeterRawMax = max(g_raw[i], g_PerimeterRawMax);
-    g_PerimeterRawMin = min(g_raw[i], g_PerimeterRawMin);
-    rawTotal = rawTotal + g_raw[i];
+    g_PerimeterSamplesForMatchedFilter[l] = RawCopy[i];
+    g_PerimeterRawMax = max(RawCopy[i], g_PerimeterRawMax);
+    g_PerimeterRawMin = min(RawCopy[i], g_PerimeterRawMin);
+    rawTotal = rawTotal + RawCopy[i];
     i = i + 1;
     if (i == RAW_SAMPLES)
     {
@@ -510,12 +556,143 @@ void GetPerimeterRawValues(int Samples)
 
   // Calculate average of samples extracted from g_Raw circular buffer
   g_PerimeterRawAvg = rawTotal / Samples;
-  xSemaphoreGive(g_RawValuesSemaphore);
-  portEXIT_CRITICAL_SAFE(&g_PerimeterTimerMux);
+  g_semholdTime = g_semholdTime + (end - start);
+//  xSemaphoreGive(g_RawValuesSemaphore);
+//  portEXIT_CRITICAL_SAFE(&g_PerimeterTimerMux);
 
 #ifdef PERIMETER_TRACE
-  Serial.println(" [" + String(g_PerimeterRawMin) + "," + String(g_PerimeterRawMax) + "] Avg=" + String(g_PerimeterRawAvg));
+//  Serial.println("=> [" + String(g_PerimeterRawMin) + "," + String(g_PerimeterRawMax) + "] Avg=" + String(g_PerimeterRawAvg));
 #endif
+}
+
+/**
+ * digital matched filter (cross correlation)
+ *
+ * @param H[] holds the double sided filter coeffs,
+ * @param subsample is the number of times for each filter coeff to repeat 
+ * @param M = H.length (number of points in FIR)
+ * @param ip[] holds input data (length > nPts + M )
+ * @param nPts is the length of the required output data
+ * @return quality is ?????
+ * @returns ?????? 
+ *
+ * @note Originally based on Ardumower (www.ardumower.de) Perimeter Library
+ * http://en.wikipedia.org/wiki/Cross-correlation
+ */
+
+int16_t corrFilter(int8_t *H, int8_t subsample, int16_t M, int8_t *ip, int16_t nPts, float &quality)
+{  
+  int16_t sumMax = 0; // max correlation sum
+  int16_t sumMin = 0; // min correlation sum
+  int16_t Ms = M * subsample; // number of filter coeffs including subsampling
+
+  // compute sum of absolute filter coeffs
+  int16_t Hsum = 0;
+  for (int16_t i=0; i<M; i++) Hsum += abs(H[i]); 
+  Hsum *= subsample;
+
+  // compute correlation
+  // for each input value
+  for (int16_t j=0; j<nPts; j++)
+  {
+      int16_t sum = 0;      
+      int8_t *Hi = H;
+      int8_t ss = 0;
+      int8_t *ipi = ip;      
+      // for each filter coeffs
+      for (int16_t i=0; i<Ms; i++)
+      {        
+        sum += ((int16_t)(*Hi)) * ((int16_t)(*ipi));
+        ss++;
+        if (ss == subsample) {
+          ss=0;
+          Hi++; // next filter coeffs
+        }
+        ipi++;
+      }      
+      if (sum > sumMax) sumMax = sum;
+      if (sum < sumMin) sumMin = sum;
+      ip++;
+  }      
+  // normalize to 4095
+  sumMin = ((float)sumMin) / ((float)(Hsum*127)) * 4095.0;
+  sumMax = ((float)sumMax) / ((float)(Hsum*127)) * 4095.0;
+  
+  // compute ratio min/max 
+  if (sumMax > -sumMin) {
+    quality = ((float)sumMax) / ((float)-sumMin);
+    return sumMax;
+  } else {
+    quality = ((float)-sumMin) / ((float)sumMax);
+    return sumMin;
+  }  
+}
+
+/**
+ * Apply matchfilter to raw values
+ *
+ * Originally based on Ardumower (www.ardumower.de) Perimeter Library
+
+ */
+void MatchedFilter(int16_t Samples)
+{
+  int16_t sampleCount = Samples;
+  int16_t mag; // perimeter magnitude
+  static float smoothMag;
+  static int signalCounter;
+  static unsigned long lastInsideTime;
+//  static int callCounter;
+
+  // int8_t *samples = ADCMan.getCapture(idxPin[idx]);    
+  // signalMin[idx] = ADCMan.getADCMin(idxPin[idx]);
+  // signalMax[idx] = ADCMan.getADCMax(idxPin[idx]);
+  // signalAvg[idx] = ADCMan.getADCAvg(idxPin[idx]);    
+
+  // magnitude for tracking (fast but inaccurate)    
+
+  int16_t sigcode_size = sizeof(sigcode_norm);
+  int8_t *sigcode = sigcode_norm;  
+  if (useDifferentialPerimeterSignal) sigcode = sigcode_diff;
+
+  mag = corrFilter(sigcode, subSample, sigcode_size, g_PerimeterSamplesForMatchedFilter, sampleCount-sigcode_size*subSample, g_PerimeterFilterQuality);
+  if (swapCoilPolarity)
+  {
+    mag = mag * -1;
+  }        
+  
+  // smoothed magnitude used for signal-off detection  
+  smoothMag = 0.99 * smoothMag + 0.01 * ((float)abs(mag));  
+  //smoothMag[idx] = 0.99 * smoothMag[idx] + 0.01 * ((float)mag[idx]);  
+
+  // perimeter inside/outside detection
+  if (mag > 0){
+    signalCounter = min(signalCounter + 1, 3);    
+  } else {
+    signalCounter = max(signalCounter - 1, -3);    
+  }
+  if (signalCounter < 0){
+    lastInsideTime = millis();
+  } 
+
+boolean isInside;
+  if (abs(mag) > 1000) {
+    // Large signal, the in/out detection is reliable.
+    // Using mag yields very fast in/out transition reporting.
+    isInside = (mag < 0);
+  } else {
+    // Low signal, use filtered value for increased reliability
+    isInside =  (signalCounter < 0);
+  }
+
+
+  xSemaphoreTake(g_MyglobalSemaphore, portMAX_DELAY);
+  g_PerimeterMagnitude = mag;
+  g_PerimeterSmoothMagnitude = smoothMag;
+  g_isInsidePerimeter = isInside;
+  xSemaphoreGive(g_MyglobalSemaphore);
+
+  // ADCMan.restart(idxPin[idx]);    
+  // if (idx == 0) callCounter++;
 }
 
 /**
@@ -524,9 +701,6 @@ void GetPerimeterRawValues(int Samples)
  */
 void PerimeterProcessingLoopTask(void *dummyParameter)
 {
-#ifdef PERIMETER_TRACE
-  static unsigned long StartMicros = micros();
-#endif  
   static bool SetupDone = false;
 
   for (;;)
@@ -549,7 +723,6 @@ void PerimeterProcessingLoopTask(void *dummyParameter)
       delayMicroseconds(TIMER_PERIMETER_PERIOD);
 
       Serial.println("PerimeterQueue:" + String(uxQueueMessagesWaiting(g_PerimeterTimerQueue)));
-
     }
 
     //------------------------------------------------------------------
@@ -560,7 +733,9 @@ void PerimeterProcessingLoopTask(void *dummyParameter)
     while (xQueueReceive(g_PerimeterTimerQueue, &evt, portMAX_DELAY) == pdPASS)
     {
 
-#ifdef PERIMETER_TRACE      
+#ifdef PERIMETER_TRACE
+      unsigned long StartMicros = micros();
+      long duration = 0;
       int inQueue = uxQueueMessagesWaiting(g_PerimeterTimerQueue);
 #endif
       if (evt == 1)
@@ -569,11 +744,23 @@ void PerimeterProcessingLoopTask(void *dummyParameter)
       GetPerimeterRawValues(192);
 
       // Run MatchFilter
+      MatchedFilter(192);
 
       // Determine Perimeter status variables
 
       // DO OTHER STUFF ??
 
+#ifdef PERIMETER_TRACE
+      portENTER_CRITICAL_SAFE(&g_LoopMux);
+      xSemaphoreTake(g_MyglobalSemaphore, portMAX_DELAY);
+      duration = micros() - StartMicros;
+      g_PerimeterinQueue = inQueue;
+      g_PerimeterinQueueMax = max(g_PerimeterinQueueMax, inQueue);
+      g_PerimeterLoopDuration = g_PerimeterLoopDuration + duration;
+      g_PerimeterLoopCount = g_PerimeterLoopCount + 1;
+      xSemaphoreGive(g_MyglobalSemaphore);
+      portEXIT_CRITICAL_SAFE(&g_LoopMux);
+#endif        
       }
     }
   }
@@ -716,11 +903,10 @@ void ArtificialLoadIO(long duration)
 
 void setup()
 {
-  Serial.begin(115200); // For debug
+  Serial.begin(256000); // For debug
+  Serial2.begin(256000); // For debug
   Serial.println();
 
-  g_ADCinUse = xSemaphoreCreateMutex();
-  g_RawValuesSemaphore = xSemaphoreCreateMutex();
   g_MyglobalSemaphore = xSemaphoreCreateMutex();
   
   FastAnaReadLoopTaskCreate();
@@ -745,19 +931,24 @@ void loop()
   long inQueue = 0;
   int inQueueMax = 0;
 #endif  
+
+#ifdef PERIMETER_TRACE
+static int PerimeterLoopcallsTotal = 0;
+#endif  
+
   uint16_t raw[RAW_SAMPLES] = {0};
 
   unsigned long now = 0;
   //    g_delay = TIMER_FAST_FREQUENCY - 10;  // 10 microsecs is assumed task processing fixed overhead
 //  g_delay = 0;
   //    g_I2SSamples = 2;
-  static long load = 0;
 
+#ifdef LOAD_SIMUL
   //time consuming loop
-
+  static long load = 0;
   ArtificialLoad(load * 2 / 4);
-//  ArtificialLoadIO(load * 2 / 4);
-
+  ArtificialLoadIO(load * 2 / 4);
+#endif
   unsigned long usedTime = micros() - previous;
 //    Serial.println("Used time:" + String(usedTime) + " ms");
 #ifndef SERIAL_PLOTTER
@@ -788,6 +979,7 @@ void loop()
   test = g_test;
   inQueue = g_inQueue;
   inQueueMax = g_inQueueMax;
+
   g_FastTimerCount = 0;
   g_FastLoopCount = 0;
   g_timeout = 0;
@@ -800,13 +992,35 @@ void loop()
   g_FastAnaReadLoopDurationMin = 9999;
   g_FastAnaReadBytesRead = 0;
 #endif
+#ifdef PERIMETER_TRACE
+  unsigned long PerimeterTimerCount = g_PerimeterTimerCount;
+  g_PerimeterTimerCount = 0;
+
+  unsigned long PerimeterLoopDuration = g_PerimeterLoopDuration;
+  g_PerimeterLoopDuration = 0;
+
+  unsigned long PerimeterLoopcalls = g_PerimeterLoopCount;
+  PerimeterLoopcallsTotal = PerimeterLoopcallsTotal + g_PerimeterLoopCount;
+  g_PerimeterLoopCount = 0; 
+
+  unsigned long PerimetersemholdTime = g_semholdTime;
+  g_semholdTime = 0;
+
+  int PerimMagnitude = g_PerimeterMagnitude;
+  int PerimSmoothMagnitude = g_PerimeterSmoothMagnitude;
+  float PerimFilterQuality = g_PerimeterFilterQuality;
+  bool IsInsidePerim = g_isInsidePerimeter;
   
+#endif
+
   int Ptr = g_rawWritePtr;
   xSemaphoreGive(g_MyglobalSemaphore);
 
   portEXIT_CRITICAL_SAFE(&g_LoopMux);
 
-#ifndef SERIAL_PLOTTER
+// #ifndef SERIAL_PLOTTER
+
+#ifdef FAST_ANALOG_TRACE
 
   //    long missed = Timerscalls - Loopcalls;
   //    float missedPct = (float) missed/Timerscalls*100;
@@ -818,7 +1032,7 @@ void loop()
   //    Serial.print(" |Missed:" + String(missed) + " " + String(missedPct,2) + " %");
   Serial.print(" |Timeout:" + String(timeouts));
   Serial.print(" |ReadTime:" + String((float)Readtime / Loopcalls) + " us");
-  Serial.print(" |LTime:" + String(AnaReadLoopDuration) + " us");
+  // Serial.print(" |LTime:" + String(AnaReadLoopDuration) + " us");
   Serial.print(" |LTime:" + String((float)AnaReadLoopDuration / Loopcalls) + " us");
   //    Serial.print(" [" + String(AnaReadLoopDurationMin) + "-" + String(AnaReadLoopDurationMax) + "] @" + String(AnaReadLoopDurationMaxloop));
   Serial.print(" [" + String(AnaReadLoopDurationMin) + "-" + String(AnaReadLoopDurationMax) + "]");
@@ -826,7 +1040,7 @@ void loop()
   //    Serial.print(" | Bytes/sample:" + String((float)AnaReadBytesRead/(g_I2SSamples),3));
   //    Serial.print(" | delta:" + String((float)((AnaReadBytesRead/Loopcalls)-(g_I2SSamples*2)),3));
   Serial.print(" | Ptr:" + String(Ptr));
-  Serial.print(" || g_delay:" + String(g_delay));
+  // Serial.print(" || g_delay:" + String(g_delay));
   Serial.print(" | load:" + String(usedTime / 1000) + " ms");
   Serial.print(" | I2Ssamples:" + String(g_I2SSamples));
   Serial.print(" | FreeHeap:" + String((esp_get_minimum_free_heap_size())));
@@ -837,6 +1051,21 @@ void loop()
 
   Serial.println();
 #endif
+#ifdef PERIMETER_TRACE
+  Serial.print("Perim TCalls:" + String(PerimeterTimerCount));
+  Serial.print(" |LCalls:" + String(PerimeterLoopcalls) + "/" + String(PerimeterLoopcallsTotal)); 
+  Serial.print(" |LTime:" + String((float)PerimeterLoopDuration / PerimeterLoopcalls) + " us");
+  Serial.print(" SemhTime:" + String((float) PerimetersemholdTime / PerimeterLoopcalls) + " us");
+  Serial.println();
+
+  Serial.print(" Filter Mag:" + String(PerimMagnitude));
+  Serial.print(" SMag:" + String(PerimSmoothMagnitude));
+  Serial.print(" FiltQual:" + String(PerimFilterQuality));
+  Serial.print(" in?:" + String(IsInsidePerim));
+  
+
+#endif
+// #endif
 
   int endPtr = Ptr - 1;
   if (endPtr < 0)
@@ -849,23 +1078,24 @@ void loop()
     startPtr = RAW_SAMPLES + startPtr;
   }
 
-#ifndef SERIAL_PLOTTER
+// #ifndef SERIAL_PLOTTER
 
-  Serial.print("Ptr:" + String(Ptr));
-  Serial.print(" From:" + String(startPtr));
-  Serial.println(" to:" + String(endPtr));
+  Serial.println();
+  // Serial.print("Ptr:" + String(Ptr));
+  // Serial.print(" From:" + String(startPtr));
+  // Serial.println(" to:" + String(endPtr));
   const int topRange = 200;
   const int midRange = 400;
   const int lowRange = 800;
 
-#endif
+// #endif
 
   int i = startPtr;
 
   for (int l = 0; l < DMA_BUF_LEN * 2; l++)
   {
 //      if (i == Ptr) {Serial.print("-[[");}
-#ifndef SERIAL_PLOTTER
+// #ifndef SERIAL_PLOTTER
     if (raw[i] > 4095 - topRange)
     {
       Serial.print("*");
@@ -882,9 +1112,10 @@ void loop()
     {
       Serial.print(" ");
     }
-#endif
+// #endif
 #ifdef SERIAL_PLOTTER
-    Serial.println(raw[i]);
+//    Serial.println("PLOT " + String(l) + " " + String(i) + " " + String(raw[i]));
+    Serial2.println("PLOT " + String(i) + " " + String(raw[i]));
 #endif
     //      Serial.print(" ");
     i = i + 1;
@@ -925,13 +1156,14 @@ void loop()
   //    g_I2SSamples = g_I2SSamples + 1;
   //    if(g_I2SSamples >= I2S_SAMPLES){g_I2SSamples=2;}
 
+#ifdef LOAD_SIMUL
   load = load + 10;
   //    Serial.println("Load:" + String(load));
   if (load > 900)
   {
     load = 0;
   }
-
+#endif
   previous = micros();
 
   //    xQueueReset(g_I2SQueueHandle);
