@@ -19,6 +19,29 @@
 //#define LOAD_SIMUL
 
 //----------------------------
+// Code
+//----------------------------
+
+// http://grauonline.de/alexwww/ardumower/filter/filter.html    
+// "pseudonoise4_pw" signal
+// if using reconstructed sender signal, use this
+int8_t g_sigcode_norm[]        = { 1,1,-1,-1,1,-1,1,-1,-1,1,-1,1,1,-1,-1,1,-1,-1,1,-1,-1,1,1,-1 };   
+// "pseudonoise4_pw" signal (differential)
+// if using the coil differential signal, use this
+int8_t g_sigcode_diff[]        = { 1,0,-1, 0,1,-1,1,-1, 0,1,-1,1,0,-1, 0,1,-1, 0,1,-1, 0,1,0,-1 };   
+
+
+// http://grauonline.de/alexwww/ardumower/filter/filter.html    
+// pseudonoise5_nrz  signal
+// if using reconstructed sender signal, use this
+// int8_t g_sigcode_norm[] = {1, 1, 1, -1, -1, -1, 1, 1, -1, 1, 1, 1, -1, 1, -1, 1, -1, -1, -1, -1, 1, -1, -1, 1, -1, 1, 1, -1, -1, 1, 1}; // pseudonoise5_nrz
+// "pseudonoise5_nrz" signal (differential)
+// if using the coil differential signal, use this
+// int8_t g_sigcode_diff[]    = {1, 0, 0, -1,  0,  0, 1, 0, -1, 1, 0, 0, -1, 1, -1, 1, -1,  0,  0,  0, 1, -1,  0, 1, -1, 0, 0, -1,  0, 1, 0};   
+
+bool useDifferentialPerimeterSignal = true;
+
+//----------------------------
 // Fast Ana Read function
 //----------------------------
 #include <driver/adc.h>
@@ -30,16 +53,17 @@
 #define SAMPLE_RATE 38400       // I2S scanning rate in samplees per second
 //#define SAMPLE_RATE 38462
 
-#define ADC_CHANNEL ADC1_CHANNEL_5 // gpio 33
-//#define ADC_CHANNEL ADC1_CHANNEL_3  // gpio 39
+//#define ADC_CHANNEL ADC1_CHANNEL_5 // gpio 33
+#define ADC_CHANNEL ADC1_CHANNEL_3  // gpio 39
 
 #define I2S_READ_TIMEOUT 1 // tics 80 = 1 microsecs
 //#define I2S_READ_TIMEOUT 80*1 // tics 80 = 1 microsecs
 //#define I2S_READ_TIMEOUT portMAX_DELAY
 
 #define BYTES_NEEDED 2
-#define I2S_SAMPLES 256
-#define DMA_BUF_LEN 24 * 4 * 2 //24 bits code length * 4 time oversampling (ardumower) * 2 Times oversampling => 192 samples
+// #define I2S_SAMPLES 256
+// #define DMA_BUF_LEN 24 * 4 * 2 //for 24 bits code length * 4 time oversampling (ardumower) * 2 Times oversampling => 192 samples
+#define DMA_BUF_LEN sizeof(g_sigcode_norm) * 4 * 2 //for 31 bits code length * 4 time oversampling (ardumower) * 2 Times oversampling => 248 samples
 #define RAW_SAMPLES DMA_BUF_LEN * 5
 #define ANA_READ_TASK_ESP_CORE 1
 
@@ -51,10 +75,16 @@ QueueHandle_t g_I2SQueueHandle;
 SemaphoreHandle_t g_ADCinUse;
 SemaphoreHandle_t g_RawValuesSemaphore;
 
-volatile int g_I2SSamples = 24 * 4 * 2;
+volatile int g_I2SSamples = sizeof(g_sigcode_norm) * 4 * 2;
 //volatile int g_I2SSamples = 10;
 uint16_t g_raw[RAW_SAMPLES];
 int g_rawWritePtr = 0;
+
+#ifdef SERIAL_PLOTTER
+uint16_t g_RawCopy[RAW_SAMPLES];
+int g_rawWritePtrCopy = 0;
+#endif
+
 volatile size_t g_timeout = 0;
 //volatile int g_I2SQueueFull = 0;
 
@@ -74,12 +104,11 @@ volatile int g_inQueueMax = 0;
 volatile long g_inQueue = 0;
 #endif
 
-
 //----------------------------
 // Perimeter function
 //----------------------------
 #define PERIMETER_PROCESSING_TASK_ESP_CORE 1
-#define TIMER_PERIMETER_PERIOD 300 * 1000 // in microseconds
+#define TIMER_PERIMETER_PERIOD 250 * 1000 // in microseconds
 #define TIMER_PERIMETER_NUMBER 1
 #define PERIMETER_QUEUE_LEN 5
 
@@ -100,17 +129,10 @@ volatile int g_PerimeterMagnitude = 0;
 volatile int g_PerimeterSmoothMagnitude = 0;
 float g_PerimeterFilterQuality = 0;
 int16_t g_PerimeterOffset=0;
+int g_signalCounter;
 
-  // http://grauonline.de/alexwww/ardumower/filter/filter.html    
-  // "pseudonoise4_pw" signal
-  // if using reconstructed sender signal, use this
-int8_t sigcode_norm[]        = { 1,1,-1,-1,1,-1,1,-1,-1,1,-1,1,1,-1,-1,1,-1,-1,1,-1,-1,1,1,-1 };   
-// "pseudonoise4_pw" signal (differential)
-// if using the coil differential signal, use this
-int8_t sigcode_diff[]        = { 1,0,-1, 0,1,-1,1,-1, 0,1,-1,1,0,-1, 0,1,-1, 0,1,-1, 0,1,0,-1 };   
 
-bool useDifferentialPerimeterSignal = true;
-bool swapCoilPolarity = false;  
+bool swapCoilPolarity = true;  
 
 char subSample = 4; // value for 38462 sampling rate
 int8_t g_PerimeterSamplesForMatchedFilter[DMA_BUF_LEN];
@@ -123,7 +145,6 @@ volatile long g_PerimeterLoopDuration = 0;
 volatile long g_PerimeterLoopCount = 0;
 volatile long g_semholdTime = 0;
 #endif
-
 
 //----------------------------
 // Common
@@ -149,7 +170,7 @@ void I2SAnalogRead(int Samples)
 #endif
 
   size_t bytesNeeded = Samples * 2;
-  uint16_t i2sData[Samples] = {0};
+  uint16_t i2sData[Samples];
   size_t bytesRead = 0;
   //  do
   //  {
@@ -196,6 +217,7 @@ void I2SAnalogRead(int Samples)
     //    if (ch == ADC_CHANNEL)
     //    {
     g_raw[g_rawWritePtr] = i2sData[i] & 0x0FFF;
+//    Serial.print(String(g_raw[g_rawWritePtr]) + " ");
     g_rawWritePtr = g_rawWritePtr + 1;
     if (g_rawWritePtr == RAW_SAMPLES)
     {
@@ -203,6 +225,7 @@ void I2SAnalogRead(int Samples)
     }
     //    };
   }
+//  Serial.println();
 
   xSemaphoreGive(g_RawValuesSemaphore);
 
@@ -225,7 +248,8 @@ void initI2S(void)
       .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN),
       .sample_rate = SAMPLE_RATE,
       .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-      .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT, // stops the sample rate being doubled vs RIGHT_LEFT
+     .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT, // stops the sample rate being doubled vs RIGHT_LEFT
+      // .channel_format = I2S_CHANNEL_FMT_ALL_RIGHT, // stops the sample rate being doubled vs RIGHT_LEFT
       .communication_format = I2S_COMM_FORMAT_I2S_LSB,
       .intr_alloc_flags = 0,
       //        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
@@ -557,7 +581,6 @@ void PerimeterRawValuesCalibration(int Samples)
   Serial.println("End of calibration: Offset:" + String(center));
 }
 
-
 /**
  * Perimeter data raw value conversion to [-127,+127] range
  * 
@@ -571,21 +594,21 @@ int8_t PerimeterRawValuesConvert(uint16_t rawVal, uint16_t offset)
   int8_t relativeValue = 0;
 
   calibratedValue = rawVal - offset;
-  relativeValue = min(SCHAR_MAX,  max(SCHAR_MIN, calibratedValue / 4));
+  relativeValue = min(SCHAR_MAX,  max(SCHAR_MIN, calibratedValue / 16));
   
   return relativeValue;
 }
 
 /**
- * Perimeter data raw value copy and pre-procEssing function (min/Max/Average)
+ * Perimeter data raw value copy and pre-processing function (min/Max/Average)
  * 
+ * @param Samples is the number of samples to copy and process
  */
 void GetPerimeterRawValues(int Samples)
 {
 #ifdef PERIMETER_TRACE
 //  Serial.print("Get " + String(Samples) + " Perimeter values ");
 #endif
-  uint16_t RawCopy[RAW_SAMPLES];
   long rawTotal = 0;
 
 //  portENTER_CRITICAL_SAFE(&g_PerimeterTimerMux);
@@ -599,8 +622,9 @@ void GetPerimeterRawValues(int Samples)
   xSemaphoreTake(g_RawValuesSemaphore, portMAX_DELAY);
 
   // Get a copy of the g_Raw circular buffer
-  memcpy(&RawCopy, &g_raw, RAW_SAMPLES*sizeof(uint16_t));
+  memcpy(&g_RawCopy, &g_raw, RAW_SAMPLES*sizeof(uint16_t));
   int Ptr = g_rawWritePtr;
+  g_rawWritePtrCopy = g_rawWritePtr;
   uint16_t offset = g_PerimeterOffset;
 
   xSemaphoreGive(g_RawValuesSemaphore);
@@ -616,7 +640,7 @@ void GetPerimeterRawValues(int Samples)
     endPtr = RAW_SAMPLES - 1;
   }
 
-  int startPtr = endPtr - DMA_BUF_LEN * 2;
+  int startPtr = endPtr - Samples;
   if (startPtr < 0)
   {
     startPtr = RAW_SAMPLES + startPtr;
@@ -635,8 +659,8 @@ void GetPerimeterRawValues(int Samples)
   int8_t maxBuf = 0;
   for (int l = 0; l < Samples; l++)
   {
-    calibratedValue = RawCopy[i] - g_PerimeterOffset;
-    relativeValue = PerimeterRawValuesConvert(RawCopy[i], offset);
+    calibratedValue = g_RawCopy[i] - g_PerimeterOffset;
+    relativeValue = PerimeterRawValuesConvert(g_RawCopy[i], offset);
     g_PerimeterSamplesForMatchedFilter[l] = relativeValue; 
     maxBuf = max(relativeValue, maxBuf);
     minBuf = min(relativeValue, minBuf);
@@ -740,10 +764,10 @@ int16_t corrFilter(int8_t *H, int8_t subsample, int16_t M, int8_t *ip, int16_t n
  */
 void MatchedFilter(int16_t Samples)
 {
-  int16_t sampleCount = Samples;
+  // int16_t sampleCount = Samples;
   int16_t mag; // perimeter magnitude
   static float smoothMag;
-  static int signalCounter;
+  float FilterQuality = 0;
   static unsigned long lastInsideTime;
 //  static int callCounter;
 
@@ -754,11 +778,27 @@ void MatchedFilter(int16_t Samples)
 
   // magnitude for tracking (fast but inaccurate)    
 
-  int16_t sigcode_size = sizeof(sigcode_norm);
-  int8_t *sigcode = sigcode_norm;  
-  if (useDifferentialPerimeterSignal) sigcode = sigcode_diff;
+  if (useDifferentialPerimeterSignal)
+  {
+//    int8_t *sigcode = g_sigcode_diff;  
+    mag = corrFilter(g_sigcode_diff, 
+                     subSample, 
+                     sizeof(g_sigcode_diff), 
+                     g_PerimeterSamplesForMatchedFilter, 
+                     Samples-sizeof(g_sigcode_diff)*subSample, 
+                     FilterQuality);
+  }
+  else
+  {
+//    int8_t *sigcode = g_sigcode_norm;  
+    mag = corrFilter(g_sigcode_norm, 
+                     subSample, 
+                     sizeof(g_sigcode_norm), 
+                     g_PerimeterSamplesForMatchedFilter, 
+                     Samples-sizeof(g_sigcode_norm)*subSample, 
+                     FilterQuality);
+  } 
 
-  mag = corrFilter(sigcode, subSample, sigcode_size, g_PerimeterSamplesForMatchedFilter, sampleCount-sigcode_size*subSample, g_PerimeterFilterQuality);
   if (swapCoilPolarity)
   {
     mag = mag * -1;
@@ -770,28 +810,35 @@ void MatchedFilter(int16_t Samples)
 
   // perimeter inside/outside detection
   if (mag > 0){
-    signalCounter = min(signalCounter + 1, 3);    
+    g_signalCounter = min(g_signalCounter + 1, 5);    
   } else {
-    signalCounter = max(signalCounter - 1, -3);    
+    g_signalCounter = max(g_signalCounter - 1, -5);    
   }
-  if (signalCounter < 0){
+  if (g_signalCounter < 0){
     lastInsideTime = millis();
   } 
 
   boolean isInside;
-  if (abs(mag) > 1000) {
+  if (abs(mag) > 190) {
     // Large signal, the in/out detection is reliable.
     // Using mag yields very fast in/out transition reporting.
     isInside = (mag < 0);
+    if(isInside){
+      g_signalCounter = -5;
+    }
+    else{
+      g_signalCounter = 5;
+    }
   } else {
     // Low signal, use filtered value for increased reliability
-    isInside =  (signalCounter < 0);
+    isInside =  (g_signalCounter < 0);
   }
 
   xSemaphoreTake(g_MyglobalSemaphore, portMAX_DELAY);
   g_PerimeterMagnitude = mag;
   g_PerimeterSmoothMagnitude = smoothMag;
   g_isInsidePerimeter = isInside;
+  g_PerimeterFilterQuality = FilterQuality;
   xSemaphoreGive(g_MyglobalSemaphore);
 
   // ADCMan.restart(idxPin[idx]);    
@@ -844,10 +891,42 @@ void PerimeterProcessingLoopTask(void *dummyParameter)
       if (evt == 1)     // Perimeter data processing
       {
         // Get values from fast aquisition Task and Calculate Min/Max/Avg
-        GetPerimeterRawValues(192);
+        GetPerimeterRawValues(DMA_BUF_LEN);
 
         // Run MatchFilter and Determine Perimeter status variables
-        MatchedFilter(192);
+        MatchedFilter(DMA_BUF_LEN);
+
+// plot Match filter results
+#ifdef SERIAL_PLOTTER
+        int Ptr = g_rawWritePtrCopy;
+        uint16_t offset = g_PerimeterOffset;
+
+        int endPtr = Ptr - 1;
+        if (endPtr < 0)
+        {
+          endPtr = RAW_SAMPLES - 1;
+        }
+        int startPtr = endPtr - DMA_BUF_LEN;
+        if (startPtr < 0)
+        {
+          startPtr = RAW_SAMPLES + startPtr;
+        }
+        int i = startPtr;
+
+        for (int l = 0; l < DMA_BUF_LEN; l++)
+        {
+          Serial2.println(String(micros() & 0x0FFFFF) + ";;;" + 
+                          String(i) + ";" + String(l) + ";" + String(g_RawCopy[i]) + ";" + 
+                          String(PerimeterRawValuesConvert(g_RawCopy[i],offset)) + ";" +
+                          String(g_PerimeterMagnitude) + ";" + String(g_PerimeterSmoothMagnitude) + ";" +
+                          String(g_PerimeterFilterQuality,2) + ";" + String(g_signalCounter)+ ";" + String(g_isInsidePerimeter));
+          i = i + 1;
+          if (i == RAW_SAMPLES)
+          {
+              i = 0;
+          }
+        }
+#endif
 
         // DO OTHER STUFF ??
 
@@ -1104,7 +1183,8 @@ void displayLog(int type, unsigned long loadTime=0)
     int PerimSmoothMagnitude = g_PerimeterSmoothMagnitude;
     float PerimFilterQuality = g_PerimeterFilterQuality;
     bool IsInsidePerim = g_isInsidePerimeter;
-    
+    int signalCounter = g_signalCounter;
+
     xSemaphoreGive(g_MyglobalSemaphore);
 
     Serial.print("Perim TCalls:" + String(PerimeterTimerCount));
@@ -1116,6 +1196,7 @@ void displayLog(int type, unsigned long loadTime=0)
     Serial.print(" Filter Mag:" + String(PerimMagnitude));
     Serial.print(" SMag:" + String(PerimSmoothMagnitude));
     Serial.print(" FiltQual:" + String(PerimFilterQuality));
+    Serial.print(" Sigcount:" + String(signalCounter));
     Serial.print(" in?:" + String(IsInsidePerim));
   }
 }
@@ -1193,7 +1274,9 @@ void displayBuffer(int samples, int disptype)
 
     if (disptype == 2)
     {
-      Serial2.println(String(micros() & 0x0FFFFF) + ";;;" + String(i) + ";" + String(raw[i]) + ";" + String(PerimeterRawValuesConvert(raw[i],offset)));
+      Serial2.println(String(micros() & 0x0FFFFF) + ";;;" + 
+                      String(i) + ";" + String(raw[i]) + ";" + String(PerimeterRawValuesConvert(raw[i],offset)) + ";" +
+                      String(g_PerimeterMagnitude) + ";" + String(g_PerimeterSmoothMagnitude) + ";" + String(g_PerimeterFilterQuality,2) + ";" + String(g_isInsidePerimeter));
     }
     //      Serial.print(" ");
     i = i + 1;
@@ -1245,7 +1328,7 @@ void loop()
 #endif
 
 #ifdef SERIAL_PLOTTER
-  displayBuffer(DMA_BUF_LEN*4, 2);      // raw values
+//  displayBuffer(DMA_BUF_LEN*4, 2);      // raw values
 #endif
 
   static unsigned long EndLoad = micros();
